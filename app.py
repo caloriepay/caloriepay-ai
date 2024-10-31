@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from exception_handlers import CustomAPIException  # 예외 처리 모듈 임포트
 from database import SessionLocal, engine
 from models import Food
+from s3_upload_handler import upload_image_to_s3
 
 # FastAPI app 생성
 app = FastAPI()
@@ -34,7 +35,12 @@ model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
 # 예외 핸들러 등록
-app.add_exception_handler(CustomAPIException, CustomAPIException.handler)
+@app.exception_handler(CustomAPIException)
+def custom_api_exception_handler(request: Request, exc: CustomAPIException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 # 데이터베이스 세션 의존성 생성
 def get_db():
@@ -103,6 +109,12 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                 cropped_image_data = BytesIO()
                 cropped_image.save(cropped_image_data, format='JPEG')
                 cropped_image_data = cropped_image_data.getvalue()
+
+                # S3에 크롭된 이미지 업로드
+                image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
+                if not image_url:
+                    logger.error("Failed to upload image to S3.")
+                    raise CustomAPIException(status_code=500, detail="이미지를 업로드할 수 없습니다.")
 
                 # 이미지 전처리
                 input_image = preprocess_image(cropped_image_data)
