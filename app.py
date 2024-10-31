@@ -13,11 +13,13 @@ import uvicorn
 import os
 import logging
 from sqlalchemy.orm import Session
-from exception_handlers import CustomAPIException  # 예외 처리 모듈 임포트
 from database import SessionLocal, engine
 from models import Food
 from s3_upload_handler import upload_image_to_s3
 from fastapi.responses import JSONResponse
+from exception_handler import CustomException, custom_exception_handler
+from res_code import ResCode
+import yaml
 
 # FastAPI app 생성
 app = FastAPI()
@@ -29,6 +31,11 @@ logger = logging.getLogger(__name__)
 # 모델 경로 설정
 MODELS_PATH = "./models"
 
+# 설정 파일 로드
+with open("config.yaml", "r") as config_file:
+    config = yaml.safe_load(config_file)
+CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.7)
+
 # 모델 불러오기
 logger.info("Loading models...")
 ort_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
@@ -36,12 +43,7 @@ model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
 # 예외 핸들러 등록
-@app.exception_handler(CustomAPIException)
-def custom_api_exception_handler(request: Request, exc: CustomAPIException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
+app.add_exception_handler(CustomException, custom_exception_handler)
 
 # 데이터베이스 세션 의존성 생성
 def get_db():
@@ -91,7 +93,7 @@ class PredictionResponse(BaseModel):
     food: List[FoodDto]
 
 # 음식 예측 API 엔드포인트 정의
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/analyze-meal-image", response_model=PredictionResponse)
 async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
     try:
         # 이미지 URL에서 이미지 다운로드
@@ -100,8 +102,8 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         image_response = requests.get(image_url)
         if image_response.status_code != 200:
             logger.error("Failed to download image.")
-            raise CustomAPIException(status_code=400, detail="이미지를 다운로드할 수 없습니다.")
-
+            raise CustomException(ResCode.NOT_FOUND)
+                    
         image_data = image_response.content
         image = Image.open(BytesIO(image_data))
         logger.info("Image downloaded successfully.")
@@ -111,53 +113,68 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         detected_objects = model_yolo(image)
         logger.info(f"Number of objects detected: {len(detected_objects[0].boxes)}")
 
-        # 감지된 객체 정보 로깅 및 dish로 탐지된 객체만 필터링
+        # dish 또는 food가 감지되지 않은 경우 예외 처리
+        if not any(model_yolo.names[int(box.cls)] in ['dish', 'food'] for box in detected_objects[0].boxes):
+            logger.error("No dish or food detected in the image.")
+            raise CustomException(ResCode.DISH_NOT_DETECTED)
+
+        # 감지된 객체 정보 로깅 및 우선 순위에 따라 dish 또는 food 사용
         food_results = []
-        for idx, box in enumerate(detected_objects[0].boxes):
-            if model_yolo.names[int(box.cls)] == 'dish':  # dish로 탐지된 객체만 사용
-                logger.info(f"Object {idx + 1} - Box coordinates: {box.xyxy[0]}")
+        selected_boxes = [box for box in detected_objects[0].boxes if model_yolo.names[int(box.cls)] == 'dish']
+        if not selected_boxes:
+            selected_boxes = [box for box in detected_objects[0].boxes if model_yolo.names[int(box.cls)] == 'food']
 
-                # 각 감지된 객체 크롭
-                logger.info(f"Processing detected object {idx + 1}...")
-                cropped_image = crop_food_object(image, box.xyxy[0])
-                cropped_image_data = BytesIO()
-                cropped_image.save(cropped_image_data, format='JPEG')
-                cropped_image_data = cropped_image_data.getvalue()
+        for idx, box in enumerate(selected_boxes):
+            logger.info(f"Object {idx + 1} - Box coordinates: {box.xyxy[0]}")
 
-                # S3에 크롭된 이미지 업로드
-                image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
-                if not image_url:
-                    logger.error("Failed to upload image to S3.")
-                    raise CustomAPIException(status_code=500, detail="이미지를 업로드할 수 없습니다.")
+            # 각 감지된 객체 크롭
+            logger.info(f"Processing detected object {idx + 1}...")
+            cropped_image = crop_food_object(image, box.xyxy[0])
+            cropped_image_data = BytesIO()
+            cropped_image.save(cropped_image_data, format='JPEG')
+            cropped_image_data = cropped_image_data.getvalue()
 
-                # 이미지 전처리
-                input_image = preprocess_image(cropped_image_data)
-                logger.info(f"Preprocessed image tensor shape: {input_image.shape}")
+            # S3에 크롭된 이미지 업로드
+            folder_name = "FOOD" if model_yolo.names[int(box.cls)] == 'food' else "DISH"
+            image_url = upload_image_to_s3(cropped_image_data, folder_name, f"cropped_{idx + 1}.jpg")
+            if not image_url:
+                logger.error("Failed to upload image to S3.")
+                raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
 
-                # ONNX 모델에 입력하여 추론
-                logger.info("Running inference on cropped image using EfficientNet...")
-                input_name = ort_efficient.get_inputs()[0].name
-                result = ort_efficient.run(None, {input_name: input_image.numpy()})
-                result = torch.tensor(result[0])
-                probabilities = torch.nn.functional.softmax(result[0], dim=0)
-                predicted_class = torch.argmax(probabilities).item()
-                logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
+            # 이미지 전처리
+            input_image = preprocess_image(cropped_image_data)
+            logger.info(f"Preprocessed image tensor shape: {input_image.shape}")
 
-                # 데이터베이스에서 음식 정보 조회
-                food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
-                if not food_info:
-                    logger.error(f"Food with class ID {predicted_class} not found in database.")
-                    raise CustomAPIException(status_code=404, detail=f"Food with class ID {predicted_class} not found.")
+            # ONNX 모델에 입력하여 추론
+            logger.info("Running inference on cropped image using EfficientNet...")
+            input_name = ort_efficient.get_inputs()[0].name
+            result = ort_efficient.run(None, {input_name: input_image.numpy()})
+            result = torch.tensor(result[0])
+            probabilities = torch.nn.functional.softmax(result[0], dim=0)
+            predicted_class = torch.argmax(probabilities).item()
+            prediction_probability = probabilities[predicted_class].item()
+            logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {prediction_probability}")
 
-                # 추론 결과 반환
-                food_results.append(FoodDto(
-                    foodName=food_info.name,
-                    foodImgUrl=image_url,
-                    calorie=int(food_info.calorie),
-                    protein=food_info.protein,
-                    carbohydrate=food_info.carbohydrate,
-                    fat=food_info.fat
-                ))
+            # 확률이 설정 파일에 정의된 임계값 미만일 경우 예외 처리
+            if prediction_probability < CONFIDENCE_THRESHOLD:
+                logger.error(f"Low confidence in prediction for object {idx + 1}: {prediction_probability}")
+                raise CustomException(ResCode.LOW_CONFIDENCE_PREDICTION)
+
+            # 데이터베이스에서 음식 정보 조회
+            food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
+            if not food_info:
+                logger.error(f"Food with class ID {predicted_class} not found in database.")
+                raise CustomException(ResCode.FOOD_NOT_FOUND)
+
+            # 추론 결과 반환
+            food_results.append(FoodDto(
+                foodName=food_info.name,
+                foodImgUrl=image_url,
+                calorie=int(food_info.calorie),
+                protein=food_info.protein,
+                carbohydrate=food_info.carbohydrate,
+                fat=food_info.fat
+            ))
 
         response_data = PredictionResponse(
             num_of_food_detected=len(food_results),
@@ -166,9 +183,11 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         logger.info("Prediction completed successfully.")
         return response_data
 
-    except Exception as e:
+    except CustomException as e:
         logger.error(f"An error occurred: {str(e)}")
-        raise CustomAPIException(status_code=500, detail=str(e))
+        raise e
+    except Exception as e:
+        raise e
 
 # FastAPI 실행
 def start():
