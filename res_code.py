@@ -8,5 +8,6 @@ class ResCode:
     IMAGE_UPLOAD_FAILED = {"status_code": 400, "detail": "이미지 업로드에 실패했습니다.", "error_code": "ERROR-BR-012"}
     DISH_NOT_DETECTED = {"status_code": 404, "detail": "음식이 탐지되지 않았습니다.", "error_code": "ERROR-NF-002"}
     FOOD_NOT_FOUND = {"status_code": 404, "detail": "해당 음식 정보를 찾을 수 없습니다.", "error_code": "ERROR-NF-003"}
+    LOW_CONFIDENCE_PREDICTION = {"status_code": 400, "detail": "이미지 예측 결과가 낮습니다.", "error_code": "ERROR-CONFIDENCE-001"}
     UNAUTHORIZED = {"status_code": 401, "detail": "권한이 없습니다.", "error_code": "ERROR-UA-000"}
     CONFLICT = {"status_code": 409, "detail": "요청에 충돌이 발생했습니다.", "error_code": "ERROR-CF-000"}
