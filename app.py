@@ -37,13 +37,6 @@ model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
 # 예외 핸들러 등록
-# @app.exception_handler(CustomAPIException)
-# def custom_api_exception_handler(request: Request, exc: CustomAPIException):
-#     return JSONResponse(
-#         status_code=exc.status_code,
-#         content={"detail": exc.detail}
-#     )
-
 app.add_exception_handler(CustomException, custom_exception_handler)
 
 # 데이터베이스 세션 의존성 생성
@@ -114,59 +107,61 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         detected_objects = model_yolo(image)
         logger.info(f"Number of objects detected: {len(detected_objects[0].boxes)}")
 
-        # dish와 food가 탐지되지 않은 경우 예외 처리
+        # dish 또는 food가 감지되지 않은 경우 예외 처리
         if not any(model_yolo.names[int(box.cls)] in ['dish', 'food'] for box in detected_objects[0].boxes):
             logger.error("No dish or food detected in the image.")
             raise CustomException(ResCode.DISH_NOT_DETECTED)
 
-
-        # 감지된 객체 정보 로깅 및 dish로 탐지된 객체만 필터링
+        # 감지된 객체 정보 로깅 및 우선 순위에 따라 dish 또는 food 사용
         food_results = []
-        for idx, box in enumerate(detected_objects[0].boxes):
-            if model_yolo.names[int(box.cls)] == 'dish':  # dish로 탐지된 객체만 사용
-                logger.info(f"Object {idx + 1} - Box coordinates: {box.xyxy[0]}")
+        selected_boxes = [box for box in detected_objects[0].boxes if model_yolo.names[int(box.cls)] == 'dish']
+        if not selected_boxes:
+            selected_boxes = [box for box in detected_objects[0].boxes if model_yolo.names[int(box.cls)] == 'food']
 
-                # 각 감지된 객체 크롭
-                logger.info(f"Processing detected object {idx + 1}...")
-                cropped_image = crop_food_object(image, box.xyxy[0])
-                cropped_image_data = BytesIO()
-                cropped_image.save(cropped_image_data, format='JPEG')
-                cropped_image_data = cropped_image_data.getvalue()
+        for idx, box in enumerate(selected_boxes):
+            logger.info(f"Object {idx + 1} - Box coordinates: {box.xyxy[0]}")
 
-                # S3에 크롭된 이미지 업로드
-                image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
-                if not image_url:
-                    logger.error("Failed to upload image to S3.")
-                    raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
+            # 각 감지된 객체 크롭
+            logger.info(f"Processing detected object {idx + 1}...")
+            cropped_image = crop_food_object(image, box.xyxy[0])
+            cropped_image_data = BytesIO()
+            cropped_image.save(cropped_image_data, format='JPEG')
+            cropped_image_data = cropped_image_data.getvalue()
 
-                # 이미지 전처리
-                input_image = preprocess_image(cropped_image_data)
-                logger.info(f"Preprocessed image tensor shape: {input_image.shape}")
+            # S3에 크롭된 이미지 업로드
+            image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
+            if not image_url:
+                logger.error("Failed to upload image to S3.")
+                raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
 
-                # ONNX 모델에 입력하여 추론
-                logger.info("Running inference on cropped image using EfficientNet...")
-                input_name = ort_efficient.get_inputs()[0].name
-                result = ort_efficient.run(None, {input_name: input_image.numpy()})
-                result = torch.tensor(result[0])
-                probabilities = torch.nn.functional.softmax(result[0], dim=0)
-                predicted_class = torch.argmax(probabilities).item()
-                logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
+            # 이미지 전처리
+            input_image = preprocess_image(cropped_image_data)
+            logger.info(f"Preprocessed image tensor shape: {input_image.shape}")
 
-                # 데이터베이스에서 음식 정보 조회
-                food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
-                if not food_info:
-                    logger.error(f"Food with class ID {predicted_class} not found in database.")
-                    raise CustomException(ResCode.FOOD_NOT_FOUND)
+            # ONNX 모델에 입력하여 추론
+            logger.info("Running inference on cropped image using EfficientNet...")
+            input_name = ort_efficient.get_inputs()[0].name
+            result = ort_efficient.run(None, {input_name: input_image.numpy()})
+            result = torch.tensor(result[0])
+            probabilities = torch.nn.functional.softmax(result[0], dim=0)
+            predicted_class = torch.argmax(probabilities).item()
+            logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
 
-                # 추론 결과 반환
-                food_results.append(FoodDto(
-                    foodName=food_info.name,
-                    foodImgUrl=image_url,
-                    calorie=int(food_info.calorie),
-                    protein=food_info.protein,
-                    carbohydrate=food_info.carbohydrate,
-                    fat=food_info.fat
-                ))
+            # 데이터베이스에서 음식 정보 조회
+            food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
+            if not food_info:
+                logger.error(f"Food with class ID {predicted_class} not found in database.")
+                raise CustomException(ResCode.FOOD_NOT_FOUND)
+
+            # 추론 결과 반환
+            food_results.append(FoodDto(
+                foodName=food_info.name,
+                foodImgUrl=image_url,
+                calorie=int(food_info.calorie),
+                protein=food_info.protein,
+                carbohydrate=food_info.carbohydrate,
+                fat=food_info.fat
+            ))
 
         response_data = PredictionResponse(
             num_of_food_detected=len(food_results),
