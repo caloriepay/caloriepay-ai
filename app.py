@@ -19,6 +19,7 @@ from s3_upload_handler import upload_image_to_s3
 from fastapi.responses import JSONResponse
 from exception_handler import CustomException, custom_exception_handler
 from res_code import ResCode
+import yaml
 
 # FastAPI app 생성
 app = FastAPI()
@@ -29,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 # 모델 경로 설정
 MODELS_PATH = "./models"
+
+# 설정 파일 로드
+with open("config.yaml", "r") as config_file:
+    config = yaml.safe_load(config_file)
+CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.7)
 
 # 모델 불러오기
 logger.info("Loading models...")
@@ -145,7 +151,13 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
             result = torch.tensor(result[0])
             probabilities = torch.nn.functional.softmax(result[0], dim=0)
             predicted_class = torch.argmax(probabilities).item()
-            logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
+            prediction_probability = probabilities[predicted_class].item()
+            logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {prediction_probability}")
+
+            # 확률이 설정 파일에 정의된 임계값 미만일 경우 예외 처리
+            if prediction_probability < CONFIDENCE_THRESHOLD:
+                logger.error(f"Low confidence in prediction for object {idx + 1}: {prediction_probability}")
+                raise CustomException(ResCode.LOW_CONFIDENCE_PREDICTION)
 
             # 데이터베이스에서 음식 정보 조회
             food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
