@@ -143,6 +143,7 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                     "protein": food_info.protein,
                     "carbohydrate": food_info.carbohydrate,
                     "fat": food_info.fat
+                    "image_url": image_url
                 })
 
         response_data = {
