@@ -75,33 +75,38 @@ async def predict_food(request: ImageUrl):
         logger.info("Detecting objects in image using YOLO...")
         detected_objects = model_yolo(image)
         logger.info(f"Number of objects detected: {len(detected_objects[0].boxes)}")
+
+        # 감지된 객체 정보 로깅 및 dish로 탐지된 객체만 필터링
         food_results = []
+        for idx, box in enumerate(detected_objects[0].boxes):
+            if model_yolo.names[int(box.cls)] == 'dish':  # dish로 탐지된 객체만 사용
+                logger.info(f"Object {idx + 1} - Box coordinates: {box.xyxy[0]}")
 
-        for obj in detected_objects[0].boxes:
-            # 각 감지된 객체 크롭
-            logger.info("Processing detected object...")
-            cropped_image = crop_food_object(image, obj.xyxy[0])
-            cropped_image_data = BytesIO()
-            cropped_image.save(cropped_image_data, format='JPEG')
-            cropped_image_data = cropped_image_data.getvalue()
+                # 각 감지된 객체 크롭
+                logger.info(f"Processing detected object {idx + 1}...")
+                cropped_image = crop_food_object(image, box.xyxy[0])
+                cropped_image_data = BytesIO()
+                cropped_image.save(cropped_image_data, format='JPEG')
+                cropped_image_data = cropped_image_data.getvalue()
 
-            # 이미지 전처리
-            input_image = preprocess_image(cropped_image_data)
+                # 이미지 전처리
+                input_image = preprocess_image(cropped_image_data)
+                logger.info(f"Preprocessed image tensor shape: {input_image.shape}")
 
-            # ONNX 모델에 입력하여 추론
-            logger.info("Running inference on cropped image using EfficientNet...")
-            input_name = ort_efficient.get_inputs()[0].name
-            result = ort_efficient.run(None, {input_name: input_image.numpy()})
-            result = torch.tensor(result[0])
-            probabilities = torch.nn.functional.softmax(result[0], dim=0)
-            predicted_class = torch.argmax(probabilities).item()
-            logger.info(f"Predicted class: {predicted_class}")
+                # ONNX 모델에 입력하여 추론
+                logger.info("Running inference on cropped image using EfficientNet...")
+                input_name = ort_efficient.get_inputs()[0].name
+                result = ort_efficient.run(None, {input_name: input_image.numpy()})
+                result = torch.tensor(result[0])
+                probabilities = torch.nn.functional.softmax(result[0], dim=0)
+                predicted_class = torch.argmax(probabilities).item()
+                logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
 
-            # 추론 결과 반환
-            food_results.append({
-                "predicted_class": predicted_class,
-                "food_name": class_dict[str(predicted_class)]
-            })
+                # 추론 결과 반환
+                food_results.append({
+                    "predicted_class": predicted_class,
+                    "food_name": class_dict[str(predicted_class)]
+                })
 
         response_data = {
             'num_of_food_detected': len(food_results),
