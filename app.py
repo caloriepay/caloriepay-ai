@@ -17,6 +17,7 @@ from exception_handlers import CustomAPIException  # 예외 처리 모듈 임포
 from database import SessionLocal, engine
 from models import Food
 from s3_upload_handler import upload_image_to_s3
+from fastapi.responses import JSONResponse
 
 # FastAPI app 생성
 app = FastAPI()
@@ -76,8 +77,21 @@ def crop_food_object(image, box):
 class ImageUrl(BaseModel):
     imgUrl: str
 
+# 반환 DTO 정의
+class FoodDto(BaseModel):
+    foodName: str
+    foodImgUrl: str
+    calorie: int
+    protein: float
+    carbohydrate: float
+    fat: float
+
+class PredictionResponse(BaseModel):
+    num_of_food_detected: int
+    food: List[FoodDto]
+
 # 음식 예측 API 엔드포인트 정의
-@app.post("/predict")
+@app.post("/predict", response_model=PredictionResponse)
 async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
     try:
         # 이미지 URL에서 이미지 다운로드
@@ -136,28 +150,25 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                     raise CustomAPIException(status_code=404, detail=f"Food with class ID {predicted_class} not found.")
 
                 # 추론 결과 반환
-                food_results.append({
-                    "predicted_class": predicted_class,
-                    "food_name": food_info.name,
-                    "calorie": food_info.calorie,
-                    "protein": food_info.protein,
-                    "carbohydrate": food_info.carbohydrate,
-                    "fat": food_info.fat
-                    "image_url": image_url
-                })
+                food_results.append(FoodDto(
+                    foodName=food_info.name,
+                    foodImgUrl=image_url,
+                    calorie=int(food_info.calorie),
+                    protein=food_info.protein,
+                    carbohydrate=food_info.carbohydrate,
+                    fat=food_info.fat
+                ))
 
-        response_data = {
-            'num_of_food_detected': len(food_results),
-            'food': food_results
-        }
+        response_data = PredictionResponse(
+            num_of_food_detected=len(food_results),
+            food=food_results
+        )
         logger.info("Prediction completed successfully.")
         return response_data
 
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         raise CustomAPIException(status_code=500, detail=str(e))
-
-# 음식 클래스 딕셔너리 정의 제거 (DB로 대체)
 
 # FastAPI 실행
 def start():
