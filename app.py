@@ -38,7 +38,7 @@ CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.7)
 
 # 모델 불러오기
 logger.info("Loading models...")
-ort_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
+orth_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
 model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
@@ -135,7 +135,8 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
             cropped_image_data = cropped_image_data.getvalue()
 
             # S3에 크롭된 이미지 업로드
-            image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
+            folder_name = "FOOD" if model_yolo.names[int(box.cls)] == 'food' else "DISH"
+            image_url = upload_image_to_s3(cropped_image_data, f"{folder_name}/cropped_{idx + 1}.jpg")
             if not image_url:
                 logger.error("Failed to upload image to S3.")
                 raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
