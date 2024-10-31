@@ -12,6 +12,7 @@ from io import BytesIO
 import uvicorn
 import os
 import logging
+from exception_handlers import CustomAPIException
 
 # FastAPI app 생성
 app = FastAPI()
@@ -65,7 +66,7 @@ async def predict_food(request: ImageUrl):
         image_response = requests.get(image_url)
         if image_response.status_code != 200:
             logger.error("Failed to download image.")
-            raise HTTPException(status_code=400, detail="이미지를 다운로드할 수 없습니다.")
+            raise CustomAPIException(status_code=400, detail="이미지를 다운로드할 수 없습니다.")
 
         image_data = image_response.content
         image = Image.open(BytesIO(image_data))
