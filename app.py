@@ -38,7 +38,7 @@ CONFIDENCE_THRESHOLD = config.get("confidence_threshold", 0.7)
 
 # 모델 불러오기
 logger.info("Loading models...")
-orth_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
+ort_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
 model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
