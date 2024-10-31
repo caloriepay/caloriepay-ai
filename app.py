@@ -13,11 +13,12 @@ import uvicorn
 import os
 import logging
 from sqlalchemy.orm import Session
-from exception_handlers import CustomAPIException  # 예외 처리 모듈 임포트
 from database import SessionLocal, engine
 from models import Food
 from s3_upload_handler import upload_image_to_s3
 from fastapi.responses import JSONResponse
+from exception_handler import CustomException, custom_exception_handler
+from res_code import ResCode
 
 # FastAPI app 생성
 app = FastAPI()
@@ -36,12 +37,14 @@ model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
 
 # 예외 핸들러 등록
-@app.exception_handler(CustomAPIException)
-def custom_api_exception_handler(request: Request, exc: CustomAPIException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
+# @app.exception_handler(CustomAPIException)
+# def custom_api_exception_handler(request: Request, exc: CustomAPIException):
+#     return JSONResponse(
+#         status_code=exc.status_code,
+#         content={"detail": exc.detail}
+#     )
+
+app.add_exception_handler(CustomException, custom_exception_handler)
 
 # 데이터베이스 세션 의존성 생성
 def get_db():
@@ -100,8 +103,8 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         image_response = requests.get(image_url)
         if image_response.status_code != 200:
             logger.error("Failed to download image.")
-            raise CustomAPIException(status_code=400, detail="이미지를 다운로드할 수 없습니다.")
-
+            raise CustomException(ResCode.NOT_FOUND)
+                    
         image_data = image_response.content
         image = Image.open(BytesIO(image_data))
         logger.info("Image downloaded successfully.")
@@ -110,6 +113,12 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         logger.info("Detecting objects in image using YOLO...")
         detected_objects = model_yolo(image)
         logger.info(f"Number of objects detected: {len(detected_objects[0].boxes)}")
+
+        # dish와 food가 탐지되지 않은 경우 예외 처리
+        if not any(model_yolo.names[int(box.cls)] in ['dish', 'food'] for box in detected_objects[0].boxes):
+            logger.error("No dish or food detected in the image.")
+            raise CustomException(ResCode.DISH_NOT_DETECTED)
+
 
         # 감지된 객체 정보 로깅 및 dish로 탐지된 객체만 필터링
         food_results = []
@@ -128,7 +137,7 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                 image_url = upload_image_to_s3(cropped_image_data, f"cropped_{idx + 1}.jpg")
                 if not image_url:
                     logger.error("Failed to upload image to S3.")
-                    raise CustomAPIException(status_code=500, detail="이미지를 업로드할 수 없습니다.")
+                    raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
 
                 # 이미지 전처리
                 input_image = preprocess_image(cropped_image_data)
@@ -147,7 +156,7 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                 food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
                 if not food_info:
                     logger.error(f"Food with class ID {predicted_class} not found in database.")
-                    raise CustomAPIException(status_code=404, detail=f"Food with class ID {predicted_class} not found.")
+                    raise CustomException(ResCode.FOOD_NOT_FOUND)
 
                 # 추론 결과 반환
                 food_results.append(FoodDto(
@@ -166,9 +175,11 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
         logger.info("Prediction completed successfully.")
         return response_data
 
-    except Exception as e:
+    except CustomException as e:
         logger.error(f"An error occurred: {str(e)}")
-        raise CustomAPIException(status_code=500, detail=str(e))
+        raise e
+    except Exception as e:
+        raise e
 
 # FastAPI 실행
 def start():
