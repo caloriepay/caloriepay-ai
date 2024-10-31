@@ -93,7 +93,7 @@ class PredictionResponse(BaseModel):
     food: List[FoodDto]
 
 # 음식 예측 API 엔드포인트 정의
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/analyze-meal-image", response_model=PredictionResponse)
 async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
     try:
         # 이미지 URL에서 이미지 다운로드
@@ -136,7 +136,7 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
 
             # S3에 크롭된 이미지 업로드
             folder_name = "FOOD" if model_yolo.names[int(box.cls)] == 'food' else "DISH"
-            image_url = upload_image_to_s3(cropped_image_data, f"{folder_name}/cropped_{idx + 1}.jpg")
+            image_url = upload_image_to_s3(cropped_image_data, folder_name, f"cropped_{idx + 1}.jpg")
             if not image_url:
                 logger.error("Failed to upload image to S3.")
                 raise CustomException(ResCode.IMAGE_UPLOAD_FAILED)
