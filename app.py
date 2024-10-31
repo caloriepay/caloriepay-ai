@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from pydantic import BaseModel
 from typing import List
 import onnxruntime
@@ -12,7 +12,10 @@ from io import BytesIO
 import uvicorn
 import os
 import logging
-from exception_handlers import CustomAPIException
+from sqlalchemy.orm import Session
+from exception_handlers import CustomAPIException  # 예외 처리 모듈 임포트
+from database import SessionLocal, engine
+from models import Food
 
 # FastAPI app 생성
 app = FastAPI()
@@ -29,6 +32,17 @@ logger.info("Loading models...")
 ort_efficient = onnxruntime.InferenceSession(os.path.join(MODELS_PATH, "efficientnet_best_model.onnx"))
 model_yolo = YOLO(os.path.join(MODELS_PATH, "best.pt"))
 logger.info("Models loaded successfully.")
+
+# 예외 핸들러 등록
+app.add_exception_handler(CustomAPIException, CustomAPIException.handler)
+
+# 데이터베이스 세션 의존성 생성
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # 이미지 전처리 함수
 def preprocess_image(image_data):
@@ -58,7 +72,7 @@ class ImageUrl(BaseModel):
 
 # 음식 예측 API 엔드포인트 정의
 @app.post("/predict")
-async def predict_food(request: ImageUrl):
+async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
     try:
         # 이미지 URL에서 이미지 다운로드
         image_url = request.imgUrl
@@ -103,10 +117,20 @@ async def predict_food(request: ImageUrl):
                 predicted_class = torch.argmax(probabilities).item()
                 logger.info(f"Predicted class for object {idx + 1}: {predicted_class} with probability {probabilities[predicted_class].item()}")
 
+                # 데이터베이스에서 음식 정보 조회
+                food_info = db.query(Food).filter(Food.class_id == predicted_class).first()
+                if not food_info:
+                    logger.error(f"Food with class ID {predicted_class} not found in database.")
+                    raise CustomAPIException(status_code=404, detail=f"Food with class ID {predicted_class} not found.")
+
                 # 추론 결과 반환
                 food_results.append({
                     "predicted_class": predicted_class,
-                    "food_name": class_dict[str(predicted_class)]
+                    "food_name": food_info.name,
+                    "calorie": food_info.calorie,
+                    "protein": food_info.protein,
+                    "carbohydrate": food_info.carbohydrate,
+                    "fat": food_info.fat
                 })
 
         response_data = {
@@ -118,34 +142,9 @@ async def predict_food(request: ImageUrl):
 
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise CustomAPIException(status_code=500, detail=str(e))
 
-# 음식 클래스 딕셔너리 정의
-class_dict = {
-    "0": "Ssalbap",
-    "1": "Kimchi Fried Rice",
-    "2": "Fried Rice",
-    "3": "Bibimbap",
-    "4": "Omurice",
-    "5": "Yukhoe Bibimbap",
-    "6": "Curry Rice",
-    "7": "Pork Gukbap",
-    "8": "Gimbap",
-    "9": "Ramen",
-    "10": "Mul Naengmyeon",
-    "11": "Bibim Naengmyeon",
-    "12": "Jajangmyeon",
-    "13": "Jjamppong",
-    "14": "Seafood Kalguksu",
-    "15": "Meat Dumplings",
-    "16": "Fried Dumplings",
-    "17": "Miyeok Guk",
-    "18": "Samgyetang",
-    "19": "Doenjang Jjigae",
-    "20": "Ham Kimchi Jjigae",
-    "21": "Beef Bulgogi",
-    "22": "Tonkatsu"
-}
+# 음식 클래스 딕셔너리 정의 제거 (DB로 대체)
 
 # FastAPI 실행
 def start():
