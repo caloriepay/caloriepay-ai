@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List
 import onnxruntime
@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, engine
 from models import Food
 from s3_upload_handler import upload_image_to_s3
-from fastapi.responses import JSONResponse
 from exception_handler import CustomException, custom_exception_handler
 from res_code import ResCode
 import yaml
@@ -88,12 +87,8 @@ class FoodDto(BaseModel):
     carbohydrate: float
     fat: float
 
-class PredictionResponse(BaseModel):
-    num_of_food_detected: int
-    food: List[FoodDto]
-
 # 음식 예측 API 엔드포인트 정의
-@app.post("/analyze-meal-image", response_model=PredictionResponse)
+@app.post("/analyze-meal-image", response_model=List[FoodDto])
 async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
     try:
         # 이미지 URL에서 이미지 다운로드
@@ -176,12 +171,8 @@ async def predict_food(request: ImageUrl, db: Session = Depends(get_db)):
                 fat=food_info.fat
             ))
 
-        response_data = PredictionResponse(
-            num_of_food_detected=len(food_results),
-            food=food_results
-        )
         logger.info("Prediction completed successfully.")
-        return response_data
+        return food_results
 
     except CustomException as e:
         logger.error(f"An error occurred: {str(e)}")
